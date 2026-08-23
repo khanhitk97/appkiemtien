@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <sys/time.h>
 #import <mach/mach_time.h>
@@ -258,13 +260,52 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. OVERLAY CHẶN VUỐT ĐƠN 5S (KHỚP UI)
+// 3. OVERLAY CHẶN THANH TRƯỢT KHI VÀO XEM ĐƠN
 // ==========================================
 @interface OrderOverlayManager : NSObject
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc;
++ (BOOL)isOrderDetailsViewController:(UIViewController *)vc;
 @end
 
 @implementation OrderOverlayManager
+
++ (BOOL)hasOrderDetailKeywordInView:(UIView *)view {
+    if ([view isKindOfClass:[UILabel class]]) {
+        NSString *text = [((UILabel *)view).text lowercaseString];
+        if (text && (
+            [text containsString:@"chi tiết đơn hàng"] ||
+            [text containsString:@"tổng thu khách hàng"] ||
+            [text containsString:@"giao đến địa chỉ"] ||
+            [text containsString:@"dặn dò shipper"] ||
+            [text containsString:@"gọi cho quán"]
+        )) {
+            return YES;
+        }
+    }
+    
+    for (UIView *subview in view.subviews) {
+        if ([self hasOrderDetailKeywordInView:subview]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
++ (BOOL)isOrderDetailsViewController:(UIViewController *)vc {
+    NSString *className = NSStringFromClass([vc class]);
+    NSString *lowerName = [className lowercaseString];
+
+    // Loại trừ trang chủ / bản đồ / navigation gốc
+    if ([lowerName containsString:@"home"] || 
+        [lowerName containsString:@"main"] || 
+        [lowerName containsString:@"tabbar"] || 
+        [lowerName containsString:@"root"] ||
+        [lowerName containsString:@"mapviewcontroller"]) {
+        return NO;
+    }
+
+    return [self hasOrderDetailKeywordInView:vc.view];
+}
 
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc {
     NSInteger overlayTag = 998877;
@@ -272,50 +313,60 @@ static void swizzle_NSDate_methods(void) {
         return;
     }
 
-    CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
-    CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
-    
-    CGFloat sliderWidth = screenWidth - 60.0f;
-    CGFloat sliderHeight = 56.0f;
-    CGFloat bottomMargin = 45.0f;
-    CGFloat sliderX = 30.0f;
-    CGFloat sliderY = screenHeight - sliderHeight - bottomMargin;
-
-    UIView *overlay = [[UIView alloc] initWithFrame:CGRectMake(sliderX, sliderY, sliderWidth, sliderHeight)];
-    overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
-    overlay.userInteractionEnabled = YES;
-    overlay.tag = overlayTag;
-    overlay.layer.cornerRadius = sliderHeight / 2.0f;
-    overlay.layer.borderWidth = 1.5f;
-    overlay.layer.borderColor = [UIColor whiteColor].CGColor;
-    overlay.clipsToBounds = YES;
-
-    UILabel *countdownLabel = [[UILabel alloc] initWithFrame:overlay.bounds];
-    countdownLabel.textColor = [UIColor whiteColor];
-    countdownLabel.font = [UIFont boldSystemFontOfSize:16.0f];
-    countdownLabel.textAlignment = NSTextAlignmentCenter;
-    [overlay addSubview:countdownLabel];
-
-    [vc.view addSubview:overlay];
-
-    __block NSInteger remainingSeconds = (NSInteger)seconds;
-    countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
-
-    NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull t) {
-        remainingSeconds--;
-        if (remainingSeconds > 0) {
-            countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
-        } else {
-            [t invalidate];
-            [UIView animateWithDuration:0.25 animations:^{
-                overlay.alpha = 0.0f;
-                overlay.transform = CGAffineTransformMakeScale(0.95, 0.95);
-            } completion:^(BOOL finished) {
-                [overlay removeFromSuperview];
-            }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (![self isOrderDetailsViewController:vc]) {
+            return;
         }
-    }];
-    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+        
+        if ([vc.view viewWithTag:overlayTag]) {
+            return;
+        }
+
+        CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
+        CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
+        
+        // Tọa độ và kích thước khớp theo thanh trượt cam
+        CGFloat sliderMarginX = 42.0f;
+        CGFloat sliderWidth = screenWidth - (sliderMarginX * 2.0f);
+        CGFloat sliderHeight = 52.0f;
+        CGFloat bottomMargin = 52.0f;
+        CGFloat sliderX = sliderMarginX;
+        CGFloat sliderY = screenHeight - sliderHeight - bottomMargin;
+
+        UIView *overlay = [[UIView alloc] initWithFrame:CGRectMake(sliderX, sliderY, sliderWidth, sliderHeight)];
+        overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.90];
+        overlay.userInteractionEnabled = YES; // Chặn mọi thao tác vuốt / chạm
+        overlay.tag = overlayTag;
+        overlay.layer.cornerRadius = sliderHeight / 2.0f;
+        overlay.clipsToBounds = YES;
+
+        UILabel *countdownLabel = [[UILabel alloc] initWithFrame:overlay.bounds];
+        countdownLabel.textColor = [UIColor whiteColor];
+        countdownLabel.font = [UIFont boldSystemFontOfSize:15.0f];
+        countdownLabel.textAlignment = NSTextAlignmentCenter;
+        [overlay addSubview:countdownLabel];
+
+        [vc.view addSubview:overlay];
+
+        __block NSInteger remainingSeconds = (NSInteger)seconds;
+        countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
+
+        NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull t) {
+            remainingSeconds--;
+            if (remainingSeconds > 0) {
+                countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
+            } else {
+                [t invalidate];
+                [UIView animateWithDuration:0.25 animations:^{
+                    overlay.alpha = 0.0f;
+                    overlay.transform = CGAffineTransformMakeScale(0.95, 0.95);
+                } completion:^(BOOL finished) {
+                    [overlay removeFromSuperview];
+                }];
+            }
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+    });
 }
 
 @end
