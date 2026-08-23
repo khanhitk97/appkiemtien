@@ -176,7 +176,7 @@ static int rebind_symbols(struct rebinding rebindings[], size_t rebindings_nel) 
 // ==========================================
 // 2. CORE SPEED ENGINE
 // ==========================================
-static float speed_factor = 5.0f;
+static float speed_factor = 5.0f; //[cite: 3]
 
 static int (*orig_gettimeofday)(struct timeval *tv, struct timezone *tz);
 static CFAbsoluteTime (*orig_CFAbsoluteTimeGetCurrent)(void);
@@ -260,7 +260,7 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. OVERLAY MANAGER
+// 3. RELIABLE OVERLAY & COUNTDOWN
 // ==========================================
 static const NSInteger kOrderOverlayTag = 998877;
 static NSTimer *activeCountdownTimer = nil;
@@ -334,42 +334,31 @@ static NSTimer *activeCountdownTimer = nil;
 }
 
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc {
-    if ([vc.view viewWithTag:kOrderOverlayTag]) {
-        return;
-    }
+    // 1. Dọn dẹp timer và view cũ nếu có
+    [self cancelOverlayImmediatelyOnViewController:vc];
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if ([self isMainListScreen:vc.view]) {
             return;
-        }
-
-        if ([vc.view viewWithTag:kOrderOverlayTag]) {
-            return;
-        }
-
-        if (activeCountdownTimer) {
-            [activeCountdownTimer invalidate];
-            activeCountdownTimer = nil;
         }
 
         CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
         CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
         
         CGRect targetFrame;
-        
         UIView *actualButton = [self findSwipeButtonInView:vc.view];
         if (actualButton) {
             targetFrame = [actualButton convertRect:actualButton.bounds toView:vc.view];
         } else {
-            CGFloat btnWidth = screenWidth * 0.68f;
-            CGFloat btnHeight = 54.0f;
-            CGFloat bottomSpacing = 50.0f;
+            CGFloat btnWidth = 256.66f;
+            CGFloat btnHeight = 50.0f;
+            CGFloat bottomSpacing = 55.0f;
             targetFrame = CGRectMake((screenWidth - btnWidth) / 2.0f, screenHeight - btnHeight - bottomSpacing, btnWidth, btnHeight);
         }
 
         UIView *overlay = [[UIView alloc] initWithFrame:targetFrame];
         overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.90];
-        overlay.userInteractionEnabled = YES;
+        overlay.userInteractionEnabled = YES; // Chặn cử chỉ vuốt
         overlay.tag = kOrderOverlayTag;
         overlay.layer.cornerRadius = targetFrame.size.height / 2.0f;
         overlay.clipsToBounds = YES;
@@ -386,7 +375,8 @@ static NSTimer *activeCountdownTimer = nil;
         __block NSInteger remainingSeconds = (NSInteger)seconds;
         countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
 
-        activeCountdownTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull t) {
+        // Khởi tạo NSTimer chuẩn và add vào NSRunLoopCommonModes
+        activeCountdownTimer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull t) {
             remainingSeconds--;
             if (remainingSeconds > 0) {
                 countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
@@ -395,7 +385,6 @@ static NSTimer *activeCountdownTimer = nil;
                 activeCountdownTimer = nil;
                 [UIView animateWithDuration:0.25 animations:^{
                     overlay.alpha = 0.0f;
-                    overlay.transform = CGAffineTransformMakeScale(0.95, 0.95);
                 } completion:^(BOOL finished) {
                     [overlay removeFromSuperview];
                 }];
