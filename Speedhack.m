@@ -176,7 +176,7 @@ static int rebind_symbols(struct rebinding rebindings[], size_t rebindings_nel) 
 // ==========================================
 // 2. CORE SPEED ENGINE
 // ==========================================
-static float speed_factor = 5.0f; // Hệ số tăng tốc x5[cite: 3]
+static float speed_factor = 5.0f; // Hệ số tốc độ x5[cite: 3]
 
 static int (*orig_gettimeofday)(struct timeval *tv, struct timezone *tz);
 static CFAbsoluteTime (*orig_CFAbsoluteTimeGetCurrent)(void);
@@ -260,17 +260,27 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. EXACT OVERLAY & COMPENSATED TIMER
+// 3. FIXED COORDINATES & ORIGINAL TIME DELTA
 // ==========================================
 static const NSInteger kOrderOverlayTag = 998877;
 static NSTimer *safeCountdownTimer = nil;
 static UIView *currentOverlayView = nil;
 
+// Lấy thời gian thực tính bằng giây trực tiếp từ con trỏ gốc orig_gettimeofday
+static double get_unhooked_real_time(void) {
+    struct timeval tv;
+    if (orig_gettimeofday) {
+        orig_gettimeofday(&tv, NULL);
+    } else {
+        gettimeofday(&tv, NULL);
+    }
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
+
 @interface OrderOverlayManager : NSObject
 + (void)showOverlayOnViewController:(UIViewController *)vc;
 + (void)cancelOverlayImmediately;
 + (BOOL)isMainListScreen:(UIView *)view;
-+ (UIView *)findRCTSwipeButtonView:(UIView *)view;
 @end
 
 @implementation OrderOverlayManager
@@ -296,22 +306,6 @@ static UIView *currentOverlayView = nil;
     return NO;
 }
 
-+ (UIView *)findRCTSwipeButtonView:(UIView *)view {
-    CGFloat w = view.frame.size.width;
-    CGFloat h = view.frame.size.height;
-
-    // Khớp kích thước RCTView từ inspector (width ~240-275pt, height ~45-55pt)
-    if (w >= 240.0f && w <= 275.0f && h >= 45.0f && h <= 55.0f) {
-        return view;
-    }
-
-    for (UIView *subview in view.subviews) {
-        UIView *found = [self findRCTSwipeButtonView:subview];
-        if (found) return found;
-    }
-    return nil;
-}
-
 + (void)cancelOverlayImmediately {
     if (safeCountdownTimer) {
         [safeCountdownTimer invalidate];
@@ -326,75 +320,65 @@ static UIView *currentOverlayView = nil;
 + (void)showOverlayOnViewController:(UIViewController *)vc {
     [self cancelOverlayImmediately];
 
-    // Delay ngắn 0.2s để cây View render
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if ([self isMainListScreen:vc.view]) {
-            return;
-        }
+    // Bỏ qua nếu ở ngoài danh sách đơn hàng
+    if ([self isMainListScreen:vc.view]) {
+        return;
+    }
 
-        UIView *rctButton = [self findRCTSwipeButtonView:vc.view];
-        UIView *parentView = nil;
-        CGRect overlayFrame;
-        CGFloat cornerRadius = 25.0f;
+    // 1. Tọa độ cố định theo đúng kích thước inspector:
+    CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
+    CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
+    CGFloat btnWidth = 256.66f;  // Chiều rộng cố định từ ảnh inspector
+    CGFloat btnHeight = 50.0f;   // Chiều cao cố định từ ảnh inspector
+    CGFloat bottomSpacing = 55.0f; // Cách mép dưới màn hình (đè khít nút cam)
+    
+    CGRect overlayFrame = CGRectMake((screenWidth - btnWidth) / 2.0f, screenHeight - btnHeight - bottomSpacing, btnWidth, btnHeight);
 
-        if (rctButton) {
-            parentView = rctButton;
-            overlayFrame = rctButton.bounds;
+    // 2. Tạo Overlay bo tròn 25pt khớp nút gốc
+    UIView *overlay = [[UIView alloc] initWithFrame:overlayFrame];
+    overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.92];
+    overlay.userInteractionEnabled = YES; // Khóa thao tác vuốt
+    overlay.tag = kOrderOverlayTag;
+    overlay.layer.cornerRadius = 25.0f;
+    overlay.clipsToBounds = YES;
+
+    UILabel *countdownLabel = [[UILabel alloc] initWithFrame:overlay.bounds];
+    countdownLabel.textColor = [UIColor whiteColor];
+    countdownLabel.font = [UIFont boldSystemFontOfSize:15.0f];
+    countdownLabel.textAlignment = NSTextAlignmentCenter;
+    countdownLabel.text = @"Đọc kỹ đơn: chờ 5s...";
+    [overlay addSubview:countdownLabel];
+
+    [vc.view addSubview:overlay];
+    [vc.view bringSubviewToFront:overlay];
+    currentOverlayView = overlay;
+
+    // 3. Đo mốc thời gian bắt đầu từ con trỏ gốc không bị tua
+    double startTime = get_unhooked_real_time();
+    const double targetDuration = 5.0; // 5.0 giây thực tế
+
+    // Timer lặp nhịp để cập nhật giao diện, tính toán theo get_unhooked_real_time()
+    safeCountdownTimer = [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer * _Nonnull t) {
+        double now = get_unhooked_real_time();
+        double elapsed = now - startTime;
+        double remaining = targetDuration - elapsed;
+
+        if (remaining > 0) {
+            NSInteger displaySec = (NSInteger)ceil(remaining);
+            countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)displaySec];
         } else {
-            CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
-            CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
-            CGFloat btnWidth = 256.66f;
-            CGFloat btnHeight = 50.0f;
-            CGFloat bottomSpacing = 55.0f;
-            
-            parentView = vc.view;
-            overlayFrame = CGRectMake((screenWidth - btnWidth) / 2.0f, screenHeight - btnHeight - bottomSpacing, btnWidth, btnHeight);
+            [t invalidate];
+            safeCountdownTimer = nil;
+            [UIView animateWithDuration:0.2 animations:^{
+                if (currentOverlayView) {
+                    currentOverlayView.alpha = 0.0f;
+                }
+            } completion:^(BOOL finished) {
+                [OrderOverlayManager cancelOverlayImmediately];
+            }];
         }
-
-        UIView *overlay = [[UIView alloc] initWithFrame:overlayFrame];
-        overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.92];
-        overlay.userInteractionEnabled = YES; // Khóa cử chỉ vuốt
-        overlay.tag = kOrderOverlayTag;
-        overlay.layer.cornerRadius = cornerRadius;
-        overlay.clipsToBounds = YES;
-        overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-
-        UILabel *countdownLabel = [[UILabel alloc] initWithFrame:overlay.bounds];
-        countdownLabel.textColor = [UIColor whiteColor];
-        countdownLabel.font = [UIFont boldSystemFontOfSize:15.0f];
-        countdownLabel.textAlignment = NSTextAlignmentCenter;
-        countdownLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [overlay addSubview:countdownLabel];
-
-        [parentView addSubview:overlay];
-        [parentView bringSubviewToFront:overlay];
-        currentOverlayView = overlay;
-
-        // Bù trừ 0.2s trễ mở màn hình để chạm chuẩn xác mốc 5.0s thực tế
-        __block float remainingRealTime = 4.8f;
-        countdownLabel.text = @"Đọc kỹ đơn: chờ 5s...";
-
-        // Quét nhịp nhanh (0.2s trong app = 0.04s đời thực) để bước nhảy mượt mà
-        safeCountdownTimer = [NSTimer scheduledTimerWithTimeInterval:0.2 repeats:YES block:^(NSTimer * _Nonnull t) {
-            remainingRealTime -= (0.2f / speed_factor);
-            
-            NSInteger displaySec = (NSInteger)ceilf(remainingRealTime);
-            if (displaySec > 0) {
-                countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)displaySec];
-            } else {
-                [t invalidate];
-                safeCountdownTimer = nil;
-                [UIView animateWithDuration:0.2 animations:^{
-                    if (currentOverlayView) {
-                        currentOverlayView.alpha = 0.0f;
-                    }
-                } completion:^(BOOL finished) {
-                    [OrderOverlayManager cancelOverlayImmediately];
-                }];
-            }
-        }];
-        [[NSRunLoop mainRunLoop] addTimer:safeCountdownTimer forMode:NSRunLoopCommonModes];
-    });
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:safeCountdownTimer forMode:NSRunLoopCommonModes];
 }
 
 @end
