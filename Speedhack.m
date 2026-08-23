@@ -264,7 +264,7 @@ static void swizzle_NSDate_methods(void) {
 // ==========================================
 static const NSInteger kOrderOverlayTag = 998877;
 static NSTimer *activeCountdownTimer = nil;
-static __weak UIView *currentOverlayView = nil;
+static UIView *currentOverlayView = nil;
 
 @interface OrderOverlayManager : NSObject
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc;
@@ -296,7 +296,6 @@ static __weak UIView *currentOverlayView = nil;
     return NO;
 }
 
-// Quét chính xác RCTView có Frame xấp xỉ width: 256.66pt, height: 50pt
 + (UIView *)findRCTSwipeButtonView:(UIView *)view {
     CGFloat w = view.frame.size.width;
     CGFloat h = view.frame.size.height;
@@ -332,19 +331,16 @@ static __weak UIView *currentOverlayView = nil;
             return;
         }
 
-        // 1. Tìm đúng RCTView của nút vuốt
         UIView *rctButton = [self findRCTSwipeButtonView:vc.view];
         
         UIView *parentView = nil;
         CGRect overlayFrame;
-        CGFloat cornerRadius = 25.0f; // Bo tròn viên thuốc theo chiều cao 50pt
+        CGFloat cornerRadius = 25.0f;
 
         if (rctButton) {
-            // Gắn trực tiếp làm subview của RCTView -> Tự động khớp 100% bounds
             parentView = rctButton;
             overlayFrame = rctButton.bounds;
         } else {
-            // Fallback nếu chưa bắt được cây view
             CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
             CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
             CGFloat btnWidth = 256.66f;
@@ -355,10 +351,9 @@ static __weak UIView *currentOverlayView = nil;
             overlayFrame = CGRectMake((screenWidth - btnWidth) / 2.0f, screenHeight - btnHeight - bottomSpacing, btnWidth, btnHeight);
         }
 
-        // 2. Tạo Overlay
         UIView *overlay = [[UIView alloc] initWithFrame:overlayFrame];
         overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.92];
-        overlay.userInteractionEnabled = YES; // Chặn triệt để cử chỉ vuốt
+        overlay.userInteractionEnabled = YES;
         overlay.tag = kOrderOverlayTag;
         overlay.layer.cornerRadius = cornerRadius;
         overlay.clipsToBounds = YES;
