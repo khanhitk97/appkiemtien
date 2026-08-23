@@ -174,7 +174,7 @@ static int rebind_symbols(struct rebinding rebindings[], size_t rebindings_nel) 
 }
 
 // ==========================================
-// 2. CORE SPEED ENGINE
+// 2. CORE SPEED ENGINE (UNIFIED TIMING)
 // ==========================================
 static float speed_factor = 5.0f;
 
@@ -260,78 +260,72 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. OVERLAY MANAGER (QUẢN LÝ BẬT / TẮT ĐẾM NGAY LẬP TỨC)
+// 3. OVERLAY CHẶN THANH TRƯỢT KHI VÀO XEM ĐƠN
 // ==========================================
-static const NSInteger kOrderOverlayTag = 998877;
-static NSTimer *activeCountdownTimer = nil;
-
 @interface OrderOverlayManager : NSObject
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc;
-+ (void)cancelOverlayImmediatelyOnViewController:(UIViewController *)vc;
-+ (BOOL)isMainListScreen:(UIView *)view;
++ (BOOL)isOrderDetailsViewController:(UIViewController *)vc;
 @end
 
 @implementation OrderOverlayManager
 
-+ (BOOL)isMainListScreen:(UIView *)view {
-    NSString *accessibility = [view.accessibilityLabel lowercaseString];
-    if (accessibility && [accessibility isEqualToString:@"đơn hàng"]) {
-        return YES;
-    }
-
-    if ([view respondsToSelector:@selector(text)]) {
++ (BOOL)hasOrderDetailKeywordInView:(UIView *)view {
+    if ([view isKindOfClass:[UILabel class]]) {
         NSString *text = [((UILabel *)view).text lowercaseString];
-        if (text && [text isEqualToString:@"đơn hàng"]) {
+        if (text && (
+            [text containsString:@"chi tiết đơn hàng"] ||
+            [text containsString:@"tổng thu khách hàng"] ||
+            [text containsString:@"giao đến địa chỉ"] ||
+            [text containsString:@"dặn dò shipper"] ||
+            [text containsString:@"gọi cho quán"]
+        )) {
             return YES;
         }
     }
-
+    
     for (UIView *subview in view.subviews) {
-        if ([self isMainListScreen:subview]) {
+        if ([self hasOrderDetailKeywordInView:subview]) {
             return YES;
         }
     }
     return NO;
 }
 
-+ (void)cancelOverlayImmediatelyOnViewController:(UIViewController *)vc {
-    // 1. Dừng timer ngay lập tức
-    if (activeCountdownTimer) {
-        [activeCountdownTimer invalidate];
-        activeCountdownTimer = nil;
++ (BOOL)isOrderDetailsViewController:(UIViewController *)vc {
+    NSString *className = NSStringFromClass([vc class]);
+    NSString *lowerName = [className lowercaseString];
+
+    // Loại trừ trang chủ / bản đồ / navigation gốc
+    if ([lowerName containsString:@"home"] || 
+        [lowerName containsString:@"main"] || 
+        [lowerName containsString:@"tabbar"] || 
+        [lowerName containsString:@"root"] ||
+        [lowerName containsString:@"mapviewcontroller"]) {
+        return NO;
     }
-    
-    // 2. Gỡ bỏ overlay khỏi view ngay lập tức
-    UIView *existingOverlay = [vc.view viewWithTag:kOrderOverlayTag];
-    if (existingOverlay) {
-        [existingOverlay removeFromSuperview];
-    }
+
+    return [self hasOrderDetailKeywordInView:vc.view];
 }
 
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc {
-    if ([vc.view viewWithTag:kOrderOverlayTag]) {
+    NSInteger overlayTag = 998877;
+    if ([vc.view viewWithTag:overlayTag]) {
         return;
     }
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // Nếu ở màn hình chính có nhãn "Đơn hàng" -> Bỏ qua
-        if ([self isMainListScreen:vc.view]) {
+        if (![self isOrderDetailsViewController:vc]) {
             return;
         }
         
-        if ([vc.view viewWithTag:kOrderOverlayTag]) {
+        if ([vc.view viewWithTag:overlayTag]) {
             return;
-        }
-
-        // Hủy timer cũ nếu còn sót lại
-        if (activeCountdownTimer) {
-            [activeCountdownTimer invalidate];
-            activeCountdownTimer = nil;
         }
 
         CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
         CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
         
+        // Tọa độ và kích thước khớp theo thanh trượt cam
         CGFloat sliderMarginX = 42.0f;
         CGFloat sliderWidth = screenWidth - (sliderMarginX * 2.0f);
         CGFloat sliderHeight = 52.0f;
@@ -341,8 +335,8 @@ static NSTimer *activeCountdownTimer = nil;
 
         UIView *overlay = [[UIView alloc] initWithFrame:CGRectMake(sliderX, sliderY, sliderWidth, sliderHeight)];
         overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.90];
-        overlay.userInteractionEnabled = YES;
-        overlay.tag = kOrderOverlayTag;
+        overlay.userInteractionEnabled = YES; // Chặn mọi thao tác vuốt / chạm
+        overlay.tag = overlayTag;
         overlay.layer.cornerRadius = sliderHeight / 2.0f;
         overlay.clipsToBounds = YES;
 
@@ -357,13 +351,12 @@ static NSTimer *activeCountdownTimer = nil;
         __block NSInteger remainingSeconds = (NSInteger)seconds;
         countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
 
-        activeCountdownTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull t) {
+        NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull t) {
             remainingSeconds--;
             if (remainingSeconds > 0) {
                 countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
             } else {
                 [t invalidate];
-                activeCountdownTimer = nil;
                 [UIView animateWithDuration:0.25 animations:^{
                     overlay.alpha = 0.0f;
                     overlay.transform = CGAffineTransformMakeScale(0.95, 0.95);
@@ -372,47 +365,29 @@ static NSTimer *activeCountdownTimer = nil;
                 }];
             }
         }];
-        [[NSRunLoop mainRunLoop] addTimer:activeCountdownTimer forMode:NSRunLoopCommonModes];
+        [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
     });
 }
 
 @end
 
-// ==========================================
-// 4. HOOK VIEW CONTROLLER LIFECYCLE
-// ==========================================
 static void (*orig_viewDidAppear)(id self, SEL _cmd, BOOL animated);
-static void (*orig_viewWillDisappear)(id self, SEL _cmd, BOOL animated);
 
 static void my_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
     orig_viewDidAppear(self, _cmd, animated);
     [OrderOverlayManager showOverlayForTimeInterval:5.0 onViewController:self];
 }
 
-static void my_viewWillDisappear(UIViewController *self, SEL _cmd, BOOL animated) {
-    orig_viewWillDisappear(self, _cmd, animated);
-    // Hủy ngay bộ đếm và xóa lớp che khi rời khỏi màn hình xem đơn
-    [OrderOverlayManager cancelOverlayImmediatelyOnViewController:self];
-}
-
 static void hook_ui_lifecycle(void) {
     Class vcClass = [UIViewController class];
-    
-    // Hook viewDidAppear
-    SEL appearSel = @selector(viewDidAppear:);
-    Method appearMethod = class_getInstanceMethod(vcClass, appearSel);
-    orig_viewDidAppear = (void (*)(id, SEL, BOOL))method_getImplementation(appearMethod);
-    method_setImplementation(appearMethod, (IMP)my_viewDidAppear);
-
-    // Hook viewWillDisappear
-    SEL disappearSel = @selector(viewWillDisappear:);
-    Method disappearMethod = class_getInstanceMethod(vcClass, disappearSel);
-    orig_viewWillDisappear = (void (*)(id, SEL, BOOL))method_getImplementation(disappearMethod);
-    method_setImplementation(disappearMethod, (IMP)my_viewWillDisappear);
+    SEL originalSelector = @selector(viewDidAppear:);
+    Method origMethod = class_getInstanceMethod(vcClass, originalSelector);
+    orig_viewDidAppear = (void (*)(id, SEL, BOOL))method_getImplementation(origMethod);
+    method_setImplementation(origMethod, (IMP)my_viewDidAppear);
 }
 
 // ==========================================
-// 5. INITIALIZER
+// 4. INITIALIZER
 // ==========================================
 __attribute__((constructor))
 static void initialize(void) {
