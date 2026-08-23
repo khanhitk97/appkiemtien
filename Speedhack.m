@@ -176,7 +176,7 @@ static int rebind_symbols(struct rebinding rebindings[], size_t rebindings_nel) 
 // ==========================================
 // 2. CORE SPEED ENGINE
 // ==========================================
-static float speed_factor = 5.0f; // Hệ số tốc độ x5[cite: 3]
+static float speed_factor = 5.0f;
 
 static int (*orig_gettimeofday)(struct timeval *tv, struct timezone *tz);
 static CFAbsoluteTime (*orig_CFAbsoluteTimeGetCurrent)(void);
@@ -260,96 +260,148 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. CRASH-FREE SAFE OVERLAY MANAGER
+// 3. OVERLAY MANAGER
 // ==========================================
 static const NSInteger kOrderOverlayTag = 998877;
-static NSTimer *safeCountdownTimer = nil;
-static UIView *currentOverlayView = nil;
+static NSTimer *activeCountdownTimer = nil;
 
 @interface OrderOverlayManager : NSObject
-+ (void)showOverlayOnViewController:(UIViewController *)vc;
-+ (void)cancelOverlayImmediately;
++ (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc;
++ (void)cancelOverlayImmediatelyOnViewController:(UIViewController *)vc;
++ (BOOL)isMainListScreen:(UIView *)view;
++ (UIView *)findSwipeButtonInView:(UIView *)view;
 @end
 
 @implementation OrderOverlayManager
 
-+ (void)cancelOverlayImmediately {
-    if (safeCountdownTimer) {
-        [safeCountdownTimer invalidate];
-        safeCountdownTimer = nil;
++ (BOOL)isMainListScreen:(UIView *)view {
+    NSString *accessibility = [view.accessibilityLabel lowercaseString];
+    if (accessibility && [accessibility isEqualToString:@"đơn hàng"]) {
+        return YES;
     }
-    if (currentOverlayView) {
-        [currentOverlayView removeFromSuperview];
-        currentOverlayView = nil;
+
+    if ([view respondsToSelector:@selector(text)]) {
+        NSString *text = [((UILabel *)view).text lowercaseString];
+        if (text && [text isEqualToString:@"đơn hàng"]) {
+            return YES;
+        }
+    }
+
+    for (UIView *subview in view.subviews) {
+        if ([self isMainListScreen:subview]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
++ (UIView *)findSwipeButtonInView:(UIView *)view {
+    BOOL match = NO;
+    NSString *acc = [view.accessibilityLabel lowercaseString];
+    if (acc && [acc containsString:@"vuốt để nhận đơn"]) match = YES;
+
+    if (!match && [view respondsToSelector:@selector(text)]) {
+        NSString *txt = [((UILabel *)view).text lowercaseString];
+        if (txt && [txt containsString:@"vuốt để nhận đơn"]) match = YES;
+    }
+
+    if (match) {
+        UIView *curr = view;
+        while (curr && curr.superview) {
+            if (curr.frame.size.height >= 45.0f && curr.frame.size.height <= 65.0f && curr.frame.size.width >= 200.0f) {
+                return curr;
+            }
+            curr = curr.superview;
+        }
+    }
+
+    for (UIView *sub in view.subviews) {
+        UIView *res = [self findSwipeButtonInView:sub];
+        if (res) return res;
+    }
+    return nil;
+}
+
++ (void)cancelOverlayImmediatelyOnViewController:(UIViewController *)vc {
+    if (activeCountdownTimer) {
+        [activeCountdownTimer invalidate];
+        activeCountdownTimer = nil;
+    }
+    UIView *existingOverlay = [vc.view viewWithTag:kOrderOverlayTag];
+    if (existingOverlay) {
+        [existingOverlay removeFromSuperview];
     }
 }
 
-+ (void)showOverlayOnViewController:(UIViewController *)vc {
-    // Chỉ kích hoạt khi ViewController là RNSScreen (màn hình React Native)
-    NSString *vcName = NSStringFromClass([vc class]);
-    if (![vcName containsString:@"RNSScreen"] && ![vcName containsString:@"Order"]) {
++ (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc {
+    if ([vc.view viewWithTag:kOrderOverlayTag]) {
         return;
     }
 
-    [self cancelOverlayImmediately];
-
-    // Delay 0.2s trên Main Queue an toàn
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!vc.isViewLoaded || vc.view.window == nil) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if ([self isMainListScreen:vc.view]) {
             return;
         }
 
-        // Tọa độ cố định khớp 100% với inspector:
+        if ([vc.view viewWithTag:kOrderOverlayTag]) {
+            return;
+        }
+
+        if (activeCountdownTimer) {
+            [activeCountdownTimer invalidate];
+            activeCountdownTimer = nil;
+        }
+
         CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
         CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
-        CGFloat btnWidth = 256.66f;
-        CGFloat btnHeight = 50.0f;
-        CGFloat bottomSpacing = 55.0f; // Vị trí nằm đè khít nút cam
         
-        CGRect overlayFrame = CGRectMake((screenWidth - btnWidth) / 2.0f, screenHeight - btnHeight - bottomSpacing, btnWidth, btnHeight);
+        CGRect targetFrame;
+        
+        UIView *actualButton = [self findSwipeButtonInView:vc.view];
+        if (actualButton) {
+            targetFrame = [actualButton convertRect:actualButton.bounds toView:vc.view];
+        } else {
+            CGFloat btnWidth = screenWidth * 0.68f;
+            CGFloat btnHeight = 54.0f;
+            CGFloat bottomSpacing = 50.0f;
+            targetFrame = CGRectMake((screenWidth - btnWidth) / 2.0f, screenHeight - btnHeight - bottomSpacing, btnWidth, btnHeight);
+        }
 
-        UIView *overlay = [[UIView alloc] initWithFrame:overlayFrame];
-        overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.92];
-        overlay.userInteractionEnabled = YES; // Chặn cử chỉ chạm/vuốt
+        UIView *overlay = [[UIView alloc] initWithFrame:targetFrame];
+        overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.90];
+        overlay.userInteractionEnabled = YES;
         overlay.tag = kOrderOverlayTag;
-        overlay.layer.cornerRadius = 25.0f;
+        overlay.layer.cornerRadius = targetFrame.size.height / 2.0f;
         overlay.clipsToBounds = YES;
 
         UILabel *countdownLabel = [[UILabel alloc] initWithFrame:overlay.bounds];
         countdownLabel.textColor = [UIColor whiteColor];
         countdownLabel.font = [UIFont boldSystemFontOfSize:15.0f];
         countdownLabel.textAlignment = NSTextAlignmentCenter;
-        countdownLabel.text = @"Đọc kỹ đơn: chờ 5s...";
         [overlay addSubview:countdownLabel];
 
         [vc.view addSubview:overlay];
         [vc.view bringSubviewToFront:overlay];
-        currentOverlayView = overlay;
 
-        // BỘ ĐẾM 5.0 GIÂY THỰC TẾ AN TOÀN:
-        // Với speed_factor = 5.0f, timer 0.2s trong app tương đương 0.04s đời thực.
-        // 5.0s thực tế = 125 nhịp 0.2s.
-        __block NSInteger remainingSteps = 125; 
+        __block NSInteger remainingSeconds = (NSInteger)seconds;
+        countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
 
-        safeCountdownTimer = [NSTimer scheduledTimerWithTimeInterval:0.2 repeats:YES block:^(NSTimer * _Nonnull t) {
-            remainingSteps--;
-            if (remainingSteps > 0) {
-                // Tính số giây thực tế còn lại: 125..101 -> 5s, 100..76 -> 4s, 75..51 -> 3s, 50..26 -> 2s, 25..1 -> 1s
-                NSInteger currentRealSec = (remainingSteps + 24) / 25;
-                countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)currentRealSec];
+        activeCountdownTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull t) {
+            remainingSeconds--;
+            if (remainingSeconds > 0) {
+                countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
             } else {
                 [t invalidate];
-                safeCountdownTimer = nil;
-                [UIView animateWithDuration:0.2 animations:^{
-                    if (currentOverlayView) {
-                        currentOverlayView.alpha = 0.0f;
-                    }
+                activeCountdownTimer = nil;
+                [UIView animateWithDuration:0.25 animations:^{
+                    overlay.alpha = 0.0f;
+                    overlay.transform = CGAffineTransformMakeScale(0.95, 0.95);
                 } completion:^(BOOL finished) {
-                    [OrderOverlayManager cancelOverlayImmediately];
+                    [overlay removeFromSuperview];
                 }];
             }
         }];
-        [[NSRunLoop mainRunLoop] addTimer:safeCountdownTimer forMode:NSRunLoopCommonModes];
+        [[NSRunLoop mainRunLoop] addTimer:activeCountdownTimer forMode:NSRunLoopCommonModes];
     });
 }
 
@@ -363,12 +415,12 @@ static void (*orig_viewWillDisappear)(id self, SEL _cmd, BOOL animated);
 
 static void my_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
     orig_viewDidAppear(self, _cmd, animated);
-    [OrderOverlayManager showOverlayOnViewController:self];
+    [OrderOverlayManager showOverlayForTimeInterval:5.0 onViewController:self];
 }
 
 static void my_viewWillDisappear(UIViewController *self, SEL _cmd, BOOL animated) {
     orig_viewWillDisappear(self, _cmd, animated);
-    [OrderOverlayManager cancelOverlayImmediately];
+    [OrderOverlayManager cancelOverlayImmediatelyOnViewController:self];
 }
 
 static void hook_ui_lifecycle(void) {
