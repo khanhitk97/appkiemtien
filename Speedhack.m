@@ -260,14 +260,14 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. EXACT RCTView OVERLAY MANAGER
+// 3. REAL-TIME GCD OVERLAY MANAGER
 // ==========================================
 static const NSInteger kOrderOverlayTag = 998877;
-static NSTimer *activeCountdownTimer = nil;
+static dispatch_source_t realTimeGcdTimer = nil;
 static UIView *currentOverlayView = nil;
 
 @interface OrderOverlayManager : NSObject
-+ (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc;
++ (void)showOverlayForTimeInterval:(NSInteger)seconds onViewController:(UIViewController *)vc;
 + (void)cancelOverlayImmediately;
 + (BOOL)isMainListScreen:(UIView *)view;
 + (UIView *)findRCTSwipeButtonView:(UIView *)view;
@@ -313,9 +313,9 @@ static UIView *currentOverlayView = nil;
 }
 
 + (void)cancelOverlayImmediately {
-    if (activeCountdownTimer) {
-        [activeCountdownTimer invalidate];
-        activeCountdownTimer = nil;
+    if (realTimeGcdTimer) {
+        dispatch_source_cancel(realTimeGcdTimer);
+        realTimeGcdTimer = nil;
     }
     if (currentOverlayView) {
         [currentOverlayView removeFromSuperview];
@@ -323,7 +323,7 @@ static UIView *currentOverlayView = nil;
     }
 }
 
-+ (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc {
++ (void)showOverlayForTimeInterval:(NSInteger)seconds onViewController:(UIViewController *)vc {
     [self cancelOverlayImmediately];
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -353,7 +353,7 @@ static UIView *currentOverlayView = nil;
 
         UIView *overlay = [[UIView alloc] initWithFrame:overlayFrame];
         overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.92];
-        overlay.userInteractionEnabled = YES;
+        overlay.userInteractionEnabled = YES; // Chặn cử chỉ vuốt
         overlay.tag = kOrderOverlayTag;
         overlay.layer.cornerRadius = cornerRadius;
         overlay.clipsToBounds = YES;
@@ -370,16 +370,27 @@ static UIView *currentOverlayView = nil;
         [parentView bringSubviewToFront:overlay];
         currentOverlayView = overlay;
 
-        __block NSInteger remainingSeconds = (NSInteger)seconds;
+        __block NSInteger remainingSeconds = seconds;
         countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
 
-        activeCountdownTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull t) {
+        // Dùng GCD Timer (DISPATCH_SOURCE_TYPE_TIMER) chạy chuẩn xác 1 giây thực tế (1,000,000,000 nanoseconds)
+        dispatch_queue_t mainQueue = dispatch_get_main_queue();
+        realTimeGcdTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, mainQueue);
+        
+        dispatch_source_set_timer(realTimeGcdTimer,
+                                  dispatch_time(DISPATCH_TIME_NOW, 1LL * NSEC_PER_SEC),
+                                  1LL * NSEC_PER_SEC,
+                                  0);
+
+        dispatch_source_set_event_handler(realTimeGcdTimer, ^{
             remainingSeconds--;
             if (remainingSeconds > 0) {
                 countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
             } else {
-                [t invalidate];
-                activeCountdownTimer = nil;
+                if (realTimeGcdTimer) {
+                    dispatch_source_cancel(realTimeGcdTimer);
+                    realTimeGcdTimer = nil;
+                }
                 [UIView animateWithDuration:0.25 animations:^{
                     if (currentOverlayView) {
                         currentOverlayView.alpha = 0.0f;
@@ -388,8 +399,9 @@ static UIView *currentOverlayView = nil;
                     [OrderOverlayManager cancelOverlayImmediately];
                 }];
             }
-        }];
-        [[NSRunLoop mainRunLoop] addTimer:activeCountdownTimer forMode:NSRunLoopCommonModes];
+        });
+
+        dispatch_resume(realTimeGcdTimer);
     });
 }
 
@@ -403,7 +415,7 @@ static void (*orig_viewWillDisappear)(id self, SEL _cmd, BOOL animated);
 
 static void my_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
     orig_viewDidAppear(self, _cmd, animated);
-    [OrderOverlayManager showOverlayForTimeInterval:5.0 onViewController:self];
+    [OrderOverlayManager showOverlayForTimeInterval:5 onViewController:self];
 }
 
 static void my_viewWillDisappear(UIViewController *self, SEL _cmd, BOOL animated) {
