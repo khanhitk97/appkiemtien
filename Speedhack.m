@@ -174,7 +174,7 @@ static int rebind_symbols(struct rebinding rebindings[], size_t rebindings_nel) 
 }
 
 // ==========================================
-// 2. CORE SPEED ENGINE (UNIFIED TIMING)
+// 2. CORE SPEED ENGINE
 // ==========================================
 static float speed_factor = 5.0f;
 
@@ -260,51 +260,35 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. OVERLAY CHẶN THANH TRƯỢT KHI VÀO XEM ĐƠN
+// 3. OVERLAY MANAGER (IN-ORDER SCREEN DETECTION)
 // ==========================================
 @interface OrderOverlayManager : NSObject
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc;
-+ (BOOL)isOrderDetailsViewController:(UIViewController *)vc;
++ (BOOL)isMainListScreen:(UIView *)view;
 @end
 
 @implementation OrderOverlayManager
 
-+ (BOOL)hasOrderDetailKeywordInView:(UIView *)view {
-    if ([view isKindOfClass:[UILabel class]]) {
+// Quét xem view có chứa nhãn "Đơn hàng" của trang chủ / danh sách hay không
++ (BOOL)isMainListScreen:(UIView *)view {
+    NSString *accessibility = [view.accessibilityLabel lowercaseString];
+    if (accessibility && [accessibility isEqualToString:@"đơn hàng"]) {
+        return YES;
+    }
+
+    if ([view respondsToSelector:@selector(text)]) {
         NSString *text = [((UILabel *)view).text lowercaseString];
-        if (text && (
-            [text containsString:@"chi tiết đơn hàng"] ||
-            [text containsString:@"tổng thu khách hàng"] ||
-            [text containsString:@"giao đến địa chỉ"] ||
-            [text containsString:@"dặn dò shipper"] ||
-            [text containsString:@"gọi cho quán"]
-        )) {
+        if (text && [text isEqualToString:@"đơn hàng"]) {
             return YES;
         }
     }
-    
+
     for (UIView *subview in view.subviews) {
-        if ([self hasOrderDetailKeywordInView:subview]) {
+        if ([self isMainListScreen:subview]) {
             return YES;
         }
     }
     return NO;
-}
-
-+ (BOOL)isOrderDetailsViewController:(UIViewController *)vc {
-    NSString *className = NSStringFromClass([vc class]);
-    NSString *lowerName = [className lowercaseString];
-
-    // Loại trừ trang chủ / bản đồ / navigation gốc
-    if ([lowerName containsString:@"home"] || 
-        [lowerName containsString:@"main"] || 
-        [lowerName containsString:@"tabbar"] || 
-        [lowerName containsString:@"root"] ||
-        [lowerName containsString:@"mapviewcontroller"]) {
-        return NO;
-    }
-
-    return [self hasOrderDetailKeywordInView:vc.view];
 }
 
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc {
@@ -313,11 +297,14 @@ static void swizzle_NSDate_methods(void) {
         return;
     }
 
+    // Delay 0.2s để React Native hoàn tất render
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (![self isOrderDetailsViewController:vc]) {
+        // NẾU CÓ chữ "Đơn hàng" (ở trang chủ) -> Bỏ qua
+        if ([self isMainListScreen:vc.view]) {
             return;
         }
         
+        // ĐÃ VÀO CHI TIẾT ĐƠN HÀNG (Không còn chữ "Đơn hàng") -> Hiện lớp phủ
         if ([vc.view viewWithTag:overlayTag]) {
             return;
         }
@@ -325,7 +312,6 @@ static void swizzle_NSDate_methods(void) {
         CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
         CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
         
-        // Tọa độ và kích thước khớp theo thanh trượt cam
         CGFloat sliderMarginX = 42.0f;
         CGFloat sliderWidth = screenWidth - (sliderMarginX * 2.0f);
         CGFloat sliderHeight = 52.0f;
@@ -335,7 +321,7 @@ static void swizzle_NSDate_methods(void) {
 
         UIView *overlay = [[UIView alloc] initWithFrame:CGRectMake(sliderX, sliderY, sliderWidth, sliderHeight)];
         overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.90];
-        overlay.userInteractionEnabled = YES; // Chặn mọi thao tác vuốt / chạm
+        overlay.userInteractionEnabled = YES; // Chặn cử chỉ vuốt
         overlay.tag = overlayTag;
         overlay.layer.cornerRadius = sliderHeight / 2.0f;
         overlay.clipsToBounds = YES;
