@@ -15,7 +15,7 @@ jobs:
 
     - name: Compile Dylib with Clang
       run: |
-        clang -dynamiclib \
+        clang -dynamiclib -fobjc-arc \
         -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
         -arch arm64 \
         Speedhack.m \
