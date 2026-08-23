@@ -260,16 +260,17 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. AUTO-ALIGNING OVERLAY MANAGER
+// 3. EXACT RCTView OVERLAY MANAGER
 // ==========================================
 static const NSInteger kOrderOverlayTag = 998877;
 static NSTimer *activeCountdownTimer = nil;
+static __weak UIView *currentOverlayView = nil;
 
 @interface OrderOverlayManager : NSObject
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc;
-+ (void)cancelOverlayImmediatelyOnViewController:(UIViewController *)vc;
++ (void)cancelOverlayImmediately;
 + (BOOL)isMainListScreen:(UIView *)view;
-+ (UIView *)findSwipeContainerViewIn:(UIView *)view;
++ (UIView *)findRCTSwipeButtonView:(UIView *)view;
 @end
 
 @implementation OrderOverlayManager
@@ -295,92 +296,71 @@ static NSTimer *activeCountdownTimer = nil;
     return NO;
 }
 
-// Thuật toán đệ quy tìm chính xác View container của thanh trượt màu cam
-+ (UIView *)findSwipeContainerViewIn:(UIView *)view {
-    // Kiểm tra nếu view này chứa text "vuốt để nhận đơn"
-    BOOL isMatch = NO;
-    NSString *acc = [view.accessibilityLabel lowercaseString];
-    if (acc && [acc containsString:@"vuốt để nhận đơn"]) isMatch = YES;
+// Quét chính xác RCTView có Frame xấp xỉ width: 256.66pt, height: 50pt
++ (UIView *)findRCTSwipeButtonView:(UIView *)view {
+    CGFloat w = view.frame.size.width;
+    CGFloat h = view.frame.size.height;
 
-    if (!isMatch && [view respondsToSelector:@selector(text)]) {
-        NSString *txt = [((UILabel *)view).text lowercaseString];
-        if (txt && [txt containsString:@"vuốt để nhận đơn"]) isMatch = YES;
-    }
-
-    if (isMatch) {
-        // Duyệt ngược lên các View cha để tìm View có kích thước nút hoàn chỉnh
-        UIView *target = view;
-        while (target.superview && target.superview != [UIApplication sharedApplication].keyWindow) {
-            if (target.frame.size.width > 150.0f && target.frame.size.height >= 40.0f && target.frame.size.height <= 80.0f) {
-                return target;
-            }
-            target = target.superview;
-        }
+    // Khớp kích thước RCTView từ inspector (width ~240-275pt, height ~45-55pt)
+    if (w >= 240.0f && w <= 275.0f && h >= 45.0f && h <= 55.0f) {
         return view;
     }
 
-    for (UIView *sub in view.subviews) {
-        UIView *found = [self findSwipeContainerViewIn:sub];
+    for (UIView *subview in view.subviews) {
+        UIView *found = [self findRCTSwipeButtonView:subview];
         if (found) return found;
     }
     return nil;
 }
 
-+ (void)cancelOverlayImmediatelyOnViewController:(UIViewController *)vc {
++ (void)cancelOverlayImmediately {
     if (activeCountdownTimer) {
         [activeCountdownTimer invalidate];
         activeCountdownTimer = nil;
     }
-    UIView *existingOverlay = [vc.view viewWithTag:kOrderOverlayTag];
-    if (existingOverlay) {
-        [existingOverlay removeFromSuperview];
+    if (currentOverlayView) {
+        [currentOverlayView removeFromSuperview];
+        currentOverlayView = nil;
     }
 }
 
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc {
-    if ([vc.view viewWithTag:kOrderOverlayTag]) {
-        return;
-    }
+    [self cancelOverlayImmediately];
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if ([self isMainListScreen:vc.view]) {
             return;
         }
 
-        if ([vc.view viewWithTag:kOrderOverlayTag]) {
-            return;
-        }
+        // 1. Tìm đúng RCTView của nút vuốt
+        UIView *rctButton = [self findRCTSwipeButtonView:vc.view];
+        
+        UIView *parentView = nil;
+        CGRect overlayFrame;
+        CGFloat cornerRadius = 25.0f; // Bo tròn viên thuốc theo chiều cao 50pt
 
-        if (activeCountdownTimer) {
-            [activeCountdownTimer invalidate];
-            activeCountdownTimer = nil;
-        }
-
-        // 1. Tự động quét tìm nút vuốt trong View Hierarchy
-        UIView *sliderView = [self findSwipeContainerViewIn:vc.view];
-        UIView *parentToAttach = sliderView ? sliderView : vc.view;
-        CGRect targetFrame;
-
-        if (sliderView) {
-            // Khớp khít 100% kích thước và góc bo của nút gốc
-            targetFrame = sliderView.bounds;
+        if (rctButton) {
+            // Gắn trực tiếp làm subview của RCTView -> Tự động khớp 100% bounds
+            parentView = rctButton;
+            overlayFrame = rctButton.bounds;
         } else {
-            // Fallback nếu không tìm thấy view con
+            // Fallback nếu chưa bắt được cây view
             CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
             CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
-            CGFloat margin = 42.0f;
-            targetFrame = CGRectMake(margin, screenHeight - 52.0f - 52.0f, screenWidth - (margin * 2.0f), 52.0f);
+            CGFloat btnWidth = 256.66f;
+            CGFloat btnHeight = 50.0f;
+            CGFloat bottomSpacing = 55.0f;
+            
+            parentView = vc.view;
+            overlayFrame = CGRectMake((screenWidth - btnWidth) / 2.0f, screenHeight - btnHeight - bottomSpacing, btnWidth, btnHeight);
         }
 
-        // 2. Tạo Overlay ôm khít
-        UIView *overlay = [[UIView alloc] initWithFrame:targetFrame];
+        // 2. Tạo Overlay
+        UIView *overlay = [[UIView alloc] initWithFrame:overlayFrame];
         overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.92];
         overlay.userInteractionEnabled = YES; // Chặn triệt để cử chỉ vuốt
         overlay.tag = kOrderOverlayTag;
-        
-        // Bo góc tự động theo chiều cao nút (chuẩn capsule)
-        CGFloat corner = sliderView ? (sliderView.layer.cornerRadius > 0 ? sliderView.layer.cornerRadius : targetFrame.size.height / 2.0f) : targetFrame.size.height / 2.0f;
-        overlay.layer.cornerRadius = corner;
+        overlay.layer.cornerRadius = cornerRadius;
         overlay.clipsToBounds = YES;
         overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
@@ -391,8 +371,9 @@ static NSTimer *activeCountdownTimer = nil;
         countdownLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [overlay addSubview:countdownLabel];
 
-        [parentToAttach addSubview:overlay];
-        [parentToAttach bringSubviewToFront:overlay];
+        [parentView addSubview:overlay];
+        [parentView bringSubviewToFront:overlay];
+        currentOverlayView = overlay;
 
         __block NSInteger remainingSeconds = (NSInteger)seconds;
         countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
@@ -405,9 +386,11 @@ static NSTimer *activeCountdownTimer = nil;
                 [t invalidate];
                 activeCountdownTimer = nil;
                 [UIView animateWithDuration:0.25 animations:^{
-                    overlay.alpha = 0.0f;
+                    if (currentOverlayView) {
+                        currentOverlayView.alpha = 0.0f;
+                    }
                 } completion:^(BOOL finished) {
-                    [overlay removeFromSuperview];
+                    [OrderOverlayManager cancelOverlayImmediately];
                 }];
             }
         }];
@@ -430,7 +413,7 @@ static void my_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
 
 static void my_viewWillDisappear(UIViewController *self, SEL _cmd, BOOL animated) {
     orig_viewWillDisappear(self, _cmd, animated);
-    [OrderOverlayManager cancelOverlayImmediatelyOnViewController:self];
+    [OrderOverlayManager cancelOverlayImmediately];
 }
 
 static void hook_ui_lifecycle(void) {
