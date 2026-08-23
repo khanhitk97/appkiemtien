@@ -260,51 +260,18 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. FIXED COORDINATES & ORIGINAL TIME DELTA
+// 3. CRASH-FREE SAFE OVERLAY MANAGER
 // ==========================================
 static const NSInteger kOrderOverlayTag = 998877;
 static NSTimer *safeCountdownTimer = nil;
 static UIView *currentOverlayView = nil;
 
-// Lấy thời gian thực tính bằng giây trực tiếp từ con trỏ gốc orig_gettimeofday
-static double get_unhooked_real_time(void) {
-    struct timeval tv;
-    if (orig_gettimeofday) {
-        orig_gettimeofday(&tv, NULL);
-    } else {
-        gettimeofday(&tv, NULL);
-    }
-    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
-}
-
 @interface OrderOverlayManager : NSObject
 + (void)showOverlayOnViewController:(UIViewController *)vc;
 + (void)cancelOverlayImmediately;
-+ (BOOL)isMainListScreen:(UIView *)view;
 @end
 
 @implementation OrderOverlayManager
-
-+ (BOOL)isMainListScreen:(UIView *)view {
-    NSString *accessibility = [view.accessibilityLabel lowercaseString];
-    if (accessibility && [accessibility isEqualToString:@"đơn hàng"]) {
-        return YES;
-    }
-
-    if ([view respondsToSelector:@selector(text)]) {
-        NSString *text = [((UILabel *)view).text lowercaseString];
-        if (text && [text isEqualToString:@"đơn hàng"]) {
-            return YES;
-        }
-    }
-
-    for (UIView *subview in view.subviews) {
-        if ([self isMainListScreen:subview]) {
-            return YES;
-        }
-    }
-    return NO;
-}
 
 + (void)cancelOverlayImmediately {
     if (safeCountdownTimer) {
@@ -318,67 +285,72 @@ static double get_unhooked_real_time(void) {
 }
 
 + (void)showOverlayOnViewController:(UIViewController *)vc {
-    [self cancelOverlayImmediately];
-
-    // Bỏ qua nếu ở ngoài danh sách đơn hàng
-    if ([self isMainListScreen:vc.view]) {
+    // Chỉ kích hoạt khi ViewController là RNSScreen (màn hình React Native)
+    NSString *vcName = NSStringFromClass([vc class]);
+    if (![vcName containsString:@"RNSScreen"] && ![vcName containsString:@"Order"]) {
         return;
     }
 
-    // 1. Tọa độ cố định theo đúng kích thước inspector:
-    CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
-    CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
-    CGFloat btnWidth = 256.66f;  // Chiều rộng cố định từ ảnh inspector
-    CGFloat btnHeight = 50.0f;   // Chiều cao cố định từ ảnh inspector
-    CGFloat bottomSpacing = 55.0f; // Cách mép dưới màn hình (đè khít nút cam)
-    
-    CGRect overlayFrame = CGRectMake((screenWidth - btnWidth) / 2.0f, screenHeight - btnHeight - bottomSpacing, btnWidth, btnHeight);
+    [self cancelOverlayImmediately];
 
-    // 2. Tạo Overlay bo tròn 25pt khớp nút gốc
-    UIView *overlay = [[UIView alloc] initWithFrame:overlayFrame];
-    overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.92];
-    overlay.userInteractionEnabled = YES; // Khóa thao tác vuốt
-    overlay.tag = kOrderOverlayTag;
-    overlay.layer.cornerRadius = 25.0f;
-    overlay.clipsToBounds = YES;
-
-    UILabel *countdownLabel = [[UILabel alloc] initWithFrame:overlay.bounds];
-    countdownLabel.textColor = [UIColor whiteColor];
-    countdownLabel.font = [UIFont boldSystemFontOfSize:15.0f];
-    countdownLabel.textAlignment = NSTextAlignmentCenter;
-    countdownLabel.text = @"Đọc kỹ đơn: chờ 5s...";
-    [overlay addSubview:countdownLabel];
-
-    [vc.view addSubview:overlay];
-    [vc.view bringSubviewToFront:overlay];
-    currentOverlayView = overlay;
-
-    // 3. Đo mốc thời gian bắt đầu từ con trỏ gốc không bị tua
-    double startTime = get_unhooked_real_time();
-    const double targetDuration = 5.0; // 5.0 giây thực tế
-
-    // Timer lặp nhịp để cập nhật giao diện, tính toán theo get_unhooked_real_time()
-    safeCountdownTimer = [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer * _Nonnull t) {
-        double now = get_unhooked_real_time();
-        double elapsed = now - startTime;
-        double remaining = targetDuration - elapsed;
-
-        if (remaining > 0) {
-            NSInteger displaySec = (NSInteger)ceil(remaining);
-            countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)displaySec];
-        } else {
-            [t invalidate];
-            safeCountdownTimer = nil;
-            [UIView animateWithDuration:0.2 animations:^{
-                if (currentOverlayView) {
-                    currentOverlayView.alpha = 0.0f;
-                }
-            } completion:^(BOOL finished) {
-                [OrderOverlayManager cancelOverlayImmediately];
-            }];
+    // Delay 0.2s trên Main Queue an toàn
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!vc.isViewLoaded || vc.view.window == nil) {
+            return;
         }
-    }];
-    [[NSRunLoop mainRunLoop] addTimer:safeCountdownTimer forMode:NSRunLoopCommonModes];
+
+        // Tọa độ cố định khớp 100% với inspector:
+        CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
+        CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
+        CGFloat btnWidth = 256.66f;
+        CGFloat btnHeight = 50.0f;
+        CGFloat bottomSpacing = 55.0f; // Vị trí nằm đè khít nút cam
+        
+        CGRect overlayFrame = CGRectMake((screenWidth - btnWidth) / 2.0f, screenHeight - btnHeight - bottomSpacing, btnWidth, btnHeight);
+
+        UIView *overlay = [[UIView alloc] initWithFrame:overlayFrame];
+        overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.92];
+        overlay.userInteractionEnabled = YES; // Chặn cử chỉ chạm/vuốt
+        overlay.tag = kOrderOverlayTag;
+        overlay.layer.cornerRadius = 25.0f;
+        overlay.clipsToBounds = YES;
+
+        UILabel *countdownLabel = [[UILabel alloc] initWithFrame:overlay.bounds];
+        countdownLabel.textColor = [UIColor whiteColor];
+        countdownLabel.font = [UIFont boldSystemFontOfSize:15.0f];
+        countdownLabel.textAlignment = NSTextAlignmentCenter;
+        countdownLabel.text = @"Đọc kỹ đơn: chờ 5s...";
+        [overlay addSubview:countdownLabel];
+
+        [vc.view addSubview:overlay];
+        [vc.view bringSubviewToFront:overlay];
+        currentOverlayView = overlay;
+
+        // BỘ ĐẾM 5.0 GIÂY THỰC TẾ AN TOÀN:
+        // Với speed_factor = 5.0f, timer 0.2s trong app tương đương 0.04s đời thực.
+        // 5.0s thực tế = 125 nhịp 0.2s.
+        __block NSInteger remainingSteps = 125; 
+
+        safeCountdownTimer = [NSTimer scheduledTimerWithTimeInterval:0.2 repeats:YES block:^(NSTimer * _Nonnull t) {
+            remainingSteps--;
+            if (remainingSteps > 0) {
+                // Tính số giây thực tế còn lại: 125..101 -> 5s, 100..76 -> 4s, 75..51 -> 3s, 50..26 -> 2s, 25..1 -> 1s
+                NSInteger currentRealSec = (remainingSteps + 24) / 25;
+                countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)currentRealSec];
+            } else {
+                [t invalidate];
+                safeCountdownTimer = nil;
+                [UIView animateWithDuration:0.2 animations:^{
+                    if (currentOverlayView) {
+                        currentOverlayView.alpha = 0.0f;
+                    }
+                } completion:^(BOOL finished) {
+                    [OrderOverlayManager cancelOverlayImmediately];
+                }];
+            }
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:safeCountdownTimer forMode:NSRunLoopCommonModes];
+    });
 }
 
 @end
