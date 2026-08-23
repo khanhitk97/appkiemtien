@@ -260,16 +260,19 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. OVERLAY MANAGER (IN-ORDER SCREEN DETECTION)
+// 3. OVERLAY MANAGER (QUẢN LÝ BẬT / TẮT ĐẾM NGAY LẬP TỨC)
 // ==========================================
+static const NSInteger kOrderOverlayTag = 998877;
+static NSTimer *activeCountdownTimer = nil;
+
 @interface OrderOverlayManager : NSObject
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc;
++ (void)cancelOverlayImmediatelyOnViewController:(UIViewController *)vc;
 + (BOOL)isMainListScreen:(UIView *)view;
 @end
 
 @implementation OrderOverlayManager
 
-// Quét xem view có chứa nhãn "Đơn hàng" của trang chủ / danh sách hay không
 + (BOOL)isMainListScreen:(UIView *)view {
     NSString *accessibility = [view.accessibilityLabel lowercaseString];
     if (accessibility && [accessibility isEqualToString:@"đơn hàng"]) {
@@ -291,22 +294,39 @@ static void swizzle_NSDate_methods(void) {
     return NO;
 }
 
++ (void)cancelOverlayImmediatelyOnViewController:(UIViewController *)vc {
+    // 1. Dừng timer ngay lập tức
+    if (activeCountdownTimer) {
+        [activeCountdownTimer invalidate];
+        activeCountdownTimer = nil;
+    }
+    
+    // 2. Gỡ bỏ overlay khỏi view ngay lập tức
+    UIView *existingOverlay = [vc.view viewWithTag:kOrderOverlayTag];
+    if (existingOverlay) {
+        [existingOverlay removeFromSuperview];
+    }
+}
+
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc {
-    NSInteger overlayTag = 998877;
-    if ([vc.view viewWithTag:overlayTag]) {
+    if ([vc.view viewWithTag:kOrderOverlayTag]) {
         return;
     }
 
-    // Delay 0.2s để React Native hoàn tất render
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // NẾU CÓ chữ "Đơn hàng" (ở trang chủ) -> Bỏ qua
+        // Nếu ở màn hình chính có nhãn "Đơn hàng" -> Bỏ qua
         if ([self isMainListScreen:vc.view]) {
             return;
         }
         
-        // ĐÃ VÀO CHI TIẾT ĐƠN HÀNG (Không còn chữ "Đơn hàng") -> Hiện lớp phủ
-        if ([vc.view viewWithTag:overlayTag]) {
+        if ([vc.view viewWithTag:kOrderOverlayTag]) {
             return;
+        }
+
+        // Hủy timer cũ nếu còn sót lại
+        if (activeCountdownTimer) {
+            [activeCountdownTimer invalidate];
+            activeCountdownTimer = nil;
         }
 
         CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
@@ -321,8 +341,8 @@ static void swizzle_NSDate_methods(void) {
 
         UIView *overlay = [[UIView alloc] initWithFrame:CGRectMake(sliderX, sliderY, sliderWidth, sliderHeight)];
         overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.90];
-        overlay.userInteractionEnabled = YES; // Chặn cử chỉ vuốt
-        overlay.tag = overlayTag;
+        overlay.userInteractionEnabled = YES;
+        overlay.tag = kOrderOverlayTag;
         overlay.layer.cornerRadius = sliderHeight / 2.0f;
         overlay.clipsToBounds = YES;
 
@@ -337,12 +357,13 @@ static void swizzle_NSDate_methods(void) {
         __block NSInteger remainingSeconds = (NSInteger)seconds;
         countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
 
-        NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull t) {
+        activeCountdownTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull t) {
             remainingSeconds--;
             if (remainingSeconds > 0) {
                 countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
             } else {
                 [t invalidate];
+                activeCountdownTimer = nil;
                 [UIView animateWithDuration:0.25 animations:^{
                     overlay.alpha = 0.0f;
                     overlay.transform = CGAffineTransformMakeScale(0.95, 0.95);
@@ -351,29 +372,47 @@ static void swizzle_NSDate_methods(void) {
                 }];
             }
         }];
-        [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+        [[NSRunLoop mainRunLoop] addTimer:activeCountdownTimer forMode:NSRunLoopCommonModes];
     });
 }
 
 @end
 
+// ==========================================
+// 4. HOOK VIEW CONTROLLER LIFECYCLE
+// ==========================================
 static void (*orig_viewDidAppear)(id self, SEL _cmd, BOOL animated);
+static void (*orig_viewWillDisappear)(id self, SEL _cmd, BOOL animated);
 
 static void my_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
     orig_viewDidAppear(self, _cmd, animated);
     [OrderOverlayManager showOverlayForTimeInterval:5.0 onViewController:self];
 }
 
+static void my_viewWillDisappear(UIViewController *self, SEL _cmd, BOOL animated) {
+    orig_viewWillDisappear(self, _cmd, animated);
+    // Hủy ngay bộ đếm và xóa lớp che khi rời khỏi màn hình xem đơn
+    [OrderOverlayManager cancelOverlayImmediatelyOnViewController:self];
+}
+
 static void hook_ui_lifecycle(void) {
     Class vcClass = [UIViewController class];
-    SEL originalSelector = @selector(viewDidAppear:);
-    Method origMethod = class_getInstanceMethod(vcClass, originalSelector);
-    orig_viewDidAppear = (void (*)(id, SEL, BOOL))method_getImplementation(origMethod);
-    method_setImplementation(origMethod, (IMP)my_viewDidAppear);
+    
+    // Hook viewDidAppear
+    SEL appearSel = @selector(viewDidAppear:);
+    Method appearMethod = class_getInstanceMethod(vcClass, appearSel);
+    orig_viewDidAppear = (void (*)(id, SEL, BOOL))method_getImplementation(appearMethod);
+    method_setImplementation(appearMethod, (IMP)my_viewDidAppear);
+
+    // Hook viewWillDisappear
+    SEL disappearSel = @selector(viewWillDisappear:);
+    Method disappearMethod = class_getInstanceMethod(vcClass, disappearSel);
+    orig_viewWillDisappear = (void (*)(id, SEL, BOOL))method_getImplementation(disappearMethod);
+    method_setImplementation(disappearMethod, (IMP)my_viewWillDisappear);
 }
 
 // ==========================================
-// 4. INITIALIZER
+// 5. INITIALIZER
 // ==========================================
 __attribute__((constructor))
 static void initialize(void) {
