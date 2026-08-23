@@ -1,8 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CoreFoundation.h>
-#import <CoreGraphics/CoreGraphics.h>
-#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <sys/time.h>
 #import <mach/mach_time.h>
@@ -260,7 +258,7 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. OVERLAY CHẶN THANH TRƯỢT KHI VÀO XEM ĐƠN
+// 3. OVERLAY CHẶN VUỐT ĐƠN 5S (CHỈ HIỆN KHI VÀO ĐƠN)
 // ==========================================
 @interface OrderOverlayManager : NSObject
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc;
@@ -269,22 +267,16 @@ static void swizzle_NSDate_methods(void) {
 
 @implementation OrderOverlayManager
 
-+ (BOOL)hasOrderDetailKeywordInView:(UIView *)view {
+// Hàm đệ quy kiểm tra xem màn hình có chứa text nhận đơn / chi tiết đơn hay không
++ (BOOL)hasOrderTextInView:(UIView *)view {
     if ([view isKindOfClass:[UILabel class]]) {
         NSString *text = [((UILabel *)view).text lowercaseString];
-        if (text && (
-            [text containsString:@"chi tiết đơn hàng"] ||
-            [text containsString:@"tổng thu khách hàng"] ||
-            [text containsString:@"giao đến địa chỉ"] ||
-            [text containsString:@"dặn dò shipper"] ||
-            [text containsString:@"gọi cho quán"]
-        )) {
+        if (text && ([text containsString:@"nhận đơn"] || [text containsString:@"chi tiết đơn"] || [text containsString:@"tài xế vui lòng"])) {
             return YES;
         }
     }
-    
     for (UIView *subview in view.subviews) {
-        if ([self hasOrderDetailKeywordInView:subview]) {
+        if ([self hasOrderTextInView:subview]) {
             return YES;
         }
     }
@@ -295,16 +287,25 @@ static void swizzle_NSDate_methods(void) {
     NSString *className = NSStringFromClass([vc class]);
     NSString *lowerName = [className lowercaseString];
 
-    // Loại trừ trang chủ / bản đồ / navigation gốc
+    // 1. Loại trừ ngay các màn hình chính/hệ thống
     if ([lowerName containsString:@"home"] || 
         [lowerName containsString:@"main"] || 
-        [lowerName containsString:@"tabbar"] || 
-        [lowerName containsString:@"root"] ||
-        [lowerName containsString:@"mapviewcontroller"]) {
+        [lowerName containsString:@"tab"] || 
+        [lowerName containsString:@"nav"] ||
+        [lowerName containsString:@"map"]) {
         return NO;
     }
 
-    return [self hasOrderDetailKeywordInView:vc.view];
+    // 2. Nếu tên class có từ khóa đơn hàng
+    if ([lowerName containsString:@"order"] || 
+        [lowerName containsString:@"detail"] || 
+        [lowerName containsString:@"delivery"] ||
+        [lowerName containsString:@"food"]) {
+        return YES;
+    }
+
+    // 3. Kiểm tra nội dung text trên view
+    return [self hasOrderTextInView:vc.view];
 }
 
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc {
@@ -313,7 +314,8 @@ static void swizzle_NSDate_methods(void) {
         return;
     }
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Delay 0.15s để view render xong nội dung và kiểm tra chính xác
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (![self isOrderDetailsViewController:vc]) {
             return;
         }
@@ -325,24 +327,24 @@ static void swizzle_NSDate_methods(void) {
         CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
         CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
         
-        // Tọa độ và kích thước khớp theo thanh trượt cam
-        CGFloat sliderMarginX = 42.0f;
-        CGFloat sliderWidth = screenWidth - (sliderMarginX * 2.0f);
-        CGFloat sliderHeight = 52.0f;
-        CGFloat bottomMargin = 52.0f;
-        CGFloat sliderX = sliderMarginX;
+        CGFloat sliderWidth = screenWidth - 60.0f;
+        CGFloat sliderHeight = 56.0f;
+        CGFloat bottomMargin = 45.0f;
+        CGFloat sliderX = 30.0f;
         CGFloat sliderY = screenHeight - sliderHeight - bottomMargin;
 
         UIView *overlay = [[UIView alloc] initWithFrame:CGRectMake(sliderX, sliderY, sliderWidth, sliderHeight)];
-        overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.90];
-        overlay.userInteractionEnabled = YES; // Chặn mọi thao tác vuốt / chạm
+        overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
+        overlay.userInteractionEnabled = YES;
         overlay.tag = overlayTag;
         overlay.layer.cornerRadius = sliderHeight / 2.0f;
+        overlay.layer.borderWidth = 1.5f;
+        overlay.layer.borderColor = [UIColor whiteColor].CGColor;
         overlay.clipsToBounds = YES;
 
         UILabel *countdownLabel = [[UILabel alloc] initWithFrame:overlay.bounds];
         countdownLabel.textColor = [UIColor whiteColor];
-        countdownLabel.font = [UIFont boldSystemFontOfSize:15.0f];
+        countdownLabel.font = [UIFont boldSystemFontOfSize:16.0f];
         countdownLabel.textAlignment = NSTextAlignmentCenter;
         [overlay addSubview:countdownLabel];
 
