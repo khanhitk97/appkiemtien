@@ -260,7 +260,7 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. OVERLAY MANAGER (QUẢN LÝ BẬT / TẮT ĐẾM NGAY LẬP TỨC)
+// 3. AUTO-ALIGNING OVERLAY MANAGER
 // ==========================================
 static const NSInteger kOrderOverlayTag = 998877;
 static NSTimer *activeCountdownTimer = nil;
@@ -269,6 +269,7 @@ static NSTimer *activeCountdownTimer = nil;
 + (void)showOverlayForTimeInterval:(NSTimeInterval)seconds onViewController:(UIViewController *)vc;
 + (void)cancelOverlayImmediatelyOnViewController:(UIViewController *)vc;
 + (BOOL)isMainListScreen:(UIView *)view;
++ (UIView *)findSwipeContainerViewIn:(UIView *)view;
 @end
 
 @implementation OrderOverlayManager
@@ -294,14 +295,42 @@ static NSTimer *activeCountdownTimer = nil;
     return NO;
 }
 
+// Thuật toán đệ quy tìm chính xác View container của thanh trượt màu cam
++ (UIView *)findSwipeContainerViewIn:(UIView *)view {
+    // Kiểm tra nếu view này chứa text "vuốt để nhận đơn"
+    BOOL isMatch = NO;
+    NSString *acc = [view.accessibilityLabel lowercaseString];
+    if (acc && [acc containsString:@"vuốt để nhận đơn"]) isMatch = YES;
+
+    if (!isMatch && [view respondsToSelector:@selector(text)]) {
+        NSString *txt = [((UILabel *)view).text lowercaseString];
+        if (txt && [txt containsString:@"vuốt để nhận đơn"]) isMatch = YES;
+    }
+
+    if (isMatch) {
+        // Duyệt ngược lên các View cha để tìm View có kích thước nút hoàn chỉnh
+        UIView *target = view;
+        while (target.superview && target.superview != [UIApplication sharedApplication].keyWindow) {
+            if (target.frame.size.width > 150.0f && target.frame.size.height >= 40.0f && target.frame.size.height <= 80.0f) {
+                return target;
+            }
+            target = target.superview;
+        }
+        return view;
+    }
+
+    for (UIView *sub in view.subviews) {
+        UIView *found = [self findSwipeContainerViewIn:sub];
+        if (found) return found;
+    }
+    return nil;
+}
+
 + (void)cancelOverlayImmediatelyOnViewController:(UIViewController *)vc {
-    // 1. Dừng timer ngay lập tức
     if (activeCountdownTimer) {
         [activeCountdownTimer invalidate];
         activeCountdownTimer = nil;
     }
-    
-    // 2. Gỡ bỏ overlay khỏi view ngay lập tức
     UIView *existingOverlay = [vc.view viewWithTag:kOrderOverlayTag];
     if (existingOverlay) {
         [existingOverlay removeFromSuperview];
@@ -313,46 +342,57 @@ static NSTimer *activeCountdownTimer = nil;
         return;
     }
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // Nếu ở màn hình chính có nhãn "Đơn hàng" -> Bỏ qua
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if ([self isMainListScreen:vc.view]) {
             return;
         }
-        
+
         if ([vc.view viewWithTag:kOrderOverlayTag]) {
             return;
         }
 
-        // Hủy timer cũ nếu còn sót lại
         if (activeCountdownTimer) {
             [activeCountdownTimer invalidate];
             activeCountdownTimer = nil;
         }
 
-        CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
-        CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
-        
-        CGFloat sliderMarginX = 42.0f;
-        CGFloat sliderWidth = screenWidth - (sliderMarginX * 2.0f);
-        CGFloat sliderHeight = 52.0f;
-        CGFloat bottomMargin = 52.0f;
-        CGFloat sliderX = sliderMarginX;
-        CGFloat sliderY = screenHeight - sliderHeight - bottomMargin;
+        // 1. Tự động quét tìm nút vuốt trong View Hierarchy
+        UIView *sliderView = [self findSwipeContainerViewIn:vc.view];
+        UIView *parentToAttach = sliderView ? sliderView : vc.view;
+        CGRect targetFrame;
 
-        UIView *overlay = [[UIView alloc] initWithFrame:CGRectMake(sliderX, sliderY, sliderWidth, sliderHeight)];
-        overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.90];
-        overlay.userInteractionEnabled = YES;
+        if (sliderView) {
+            // Khớp khít 100% kích thước và góc bo của nút gốc
+            targetFrame = sliderView.bounds;
+        } else {
+            // Fallback nếu không tìm thấy view con
+            CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
+            CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
+            CGFloat margin = 42.0f;
+            targetFrame = CGRectMake(margin, screenHeight - 52.0f - 52.0f, screenWidth - (margin * 2.0f), 52.0f);
+        }
+
+        // 2. Tạo Overlay ôm khít
+        UIView *overlay = [[UIView alloc] initWithFrame:targetFrame];
+        overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.92];
+        overlay.userInteractionEnabled = YES; // Chặn triệt để cử chỉ vuốt
         overlay.tag = kOrderOverlayTag;
-        overlay.layer.cornerRadius = sliderHeight / 2.0f;
+        
+        // Bo góc tự động theo chiều cao nút (chuẩn capsule)
+        CGFloat corner = sliderView ? (sliderView.layer.cornerRadius > 0 ? sliderView.layer.cornerRadius : targetFrame.size.height / 2.0f) : targetFrame.size.height / 2.0f;
+        overlay.layer.cornerRadius = corner;
         overlay.clipsToBounds = YES;
+        overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
         UILabel *countdownLabel = [[UILabel alloc] initWithFrame:overlay.bounds];
         countdownLabel.textColor = [UIColor whiteColor];
         countdownLabel.font = [UIFont boldSystemFontOfSize:15.0f];
         countdownLabel.textAlignment = NSTextAlignmentCenter;
+        countdownLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [overlay addSubview:countdownLabel];
 
-        [vc.view addSubview:overlay];
+        [parentToAttach addSubview:overlay];
+        [parentToAttach bringSubviewToFront:overlay];
 
         __block NSInteger remainingSeconds = (NSInteger)seconds;
         countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
@@ -366,7 +406,6 @@ static NSTimer *activeCountdownTimer = nil;
                 activeCountdownTimer = nil;
                 [UIView animateWithDuration:0.25 animations:^{
                     overlay.alpha = 0.0f;
-                    overlay.transform = CGAffineTransformMakeScale(0.95, 0.95);
                 } completion:^(BOOL finished) {
                     [overlay removeFromSuperview];
                 }];
@@ -391,20 +430,17 @@ static void my_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
 
 static void my_viewWillDisappear(UIViewController *self, SEL _cmd, BOOL animated) {
     orig_viewWillDisappear(self, _cmd, animated);
-    // Hủy ngay bộ đếm và xóa lớp che khi rời khỏi màn hình xem đơn
     [OrderOverlayManager cancelOverlayImmediatelyOnViewController:self];
 }
 
 static void hook_ui_lifecycle(void) {
     Class vcClass = [UIViewController class];
     
-    // Hook viewDidAppear
     SEL appearSel = @selector(viewDidAppear:);
     Method appearMethod = class_getInstanceMethod(vcClass, appearSel);
     orig_viewDidAppear = (void (*)(id, SEL, BOOL))method_getImplementation(appearMethod);
     method_setImplementation(appearMethod, (IMP)my_viewDidAppear);
 
-    // Hook viewWillDisappear
     SEL disappearSel = @selector(viewWillDisappear:);
     Method disappearMethod = class_getInstanceMethod(vcClass, disappearSel);
     orig_viewWillDisappear = (void (*)(id, SEL, BOOL))method_getImplementation(disappearMethod);
