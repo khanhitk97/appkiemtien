@@ -6,6 +6,7 @@
 #import <objc/runtime.h>
 #import <sys/time.h>
 #import <mach/mach_time.h>
+#import <pthread.h>
 #import <dlfcn.h>
 #import <stdlib.h>
 #import <string.h>
@@ -178,6 +179,7 @@ static int rebind_symbols(struct rebinding rebindings[], size_t rebindings_nel) 
 // ==========================================
 static float speed_factor = 5.0f;
 
+// Original C Function Pointers (Dùng trực tiếp để đo thời gian thật)
 static int (*orig_gettimeofday)(struct timeval *tv, struct timezone *tz);
 static CFAbsoluteTime (*orig_CFAbsoluteTimeGetCurrent)(void);
 static uint64_t (*orig_mach_absolute_time)(void);
@@ -260,14 +262,75 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. REAL-TIME GCD OVERLAY MANAGER
+// 3. HARDWARE-ISOLATED WALL CLOCK TIMER
 // ==========================================
 static const NSInteger kOrderOverlayTag = 998877;
-static dispatch_source_t realTimeGcdTimer = nil;
 static UIView *currentOverlayView = nil;
+static UILabel *currentCountdownLabel = nil;
+static pthread_t countdownThread = NULL;
+static volatile BOOL isThreadRunning = NO;
+static int currentSessionID = 0;
+
+// Hàm lấy mili-giây vật lý chuẩn của phần cứng từ orig_mach_absolute_time
+static uint64_t get_real_hardware_milliseconds(void) {
+    static mach_timebase_info_data_t timebase;
+    if (timebase.denom == 0) {
+        mach_timebase_info(&timebase);
+    }
+    uint64_t real_mach = orig_mach_absolute_time ? orig_mach_absolute_time() : mach_absolute_time();
+    return (real_mach * timebase.numer) / (timebase.denom * 1000000ULL);
+}
+
+// Thread đếm ngược hoàn toàn độc lập với hệ thống
+static void* countdown_worker_thread(void *arg) {
+    int session = (int)(intptr_t)arg;
+    uint64_t start_ms = get_real_hardware_milliseconds();
+    const uint64_t total_duration_ms = 5000; // 5000ms chuẩn ngoài đời
+
+    while (isThreadRunning && session == currentSessionID) {
+        uint64_t elapsed_ms = get_real_hardware_milliseconds() - start_ms;
+        if (elapsed_ms >= total_duration_ms) {
+            break;
+        }
+
+        int remainingSec = (int)((total_duration_ms - elapsed_ms + 999) / 1000);
+
+        // Cập nhật text UI trên Main Thread
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (session == currentSessionID && currentCountdownLabel) {
+                currentCountdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %ds...", remainingSec];
+            }
+        });
+
+        // Nghỉ 50ms (đo theo nhịp phần cứng)
+        uint64_t sleep_target = get_real_hardware_milliseconds() + 50;
+        while (get_real_hardware_milliseconds() < sleep_target && isThreadRunning && session == currentSessionID) {
+            struct timespec ts = {0, 10 * 1000 * 1000}; // 10ms
+            nanosleep(&ts, NULL);
+        }
+    }
+
+    // Kết thúc 5s thực tế -> Gỡ bỏ overlay trên Main Thread
+    if (isThreadRunning && session == currentSessionID) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (session == currentSessionID && currentOverlayView) {
+                [UIView animateWithDuration:0.25 animations:^{
+                    currentOverlayView.alpha = 0.0f;
+                } completion:^(BOOL finished) {
+                    if (session == currentSessionID && currentOverlayView) {
+                        [currentOverlayView removeFromSuperview];
+                        currentOverlayView = nil;
+                        currentCountdownLabel = nil;
+                    }
+                }];
+            }
+        });
+    }
+    return NULL;
+}
 
 @interface OrderOverlayManager : NSObject
-+ (void)showOverlayForTimeInterval:(NSInteger)seconds onViewController:(UIViewController *)vc;
++ (void)showOverlayOnViewController:(UIViewController *)vc;
 + (void)cancelOverlayImmediately;
 + (BOOL)isMainListScreen:(UIView *)view;
 + (UIView *)findRCTSwipeButtonView:(UIView *)view;
@@ -313,26 +376,26 @@ static UIView *currentOverlayView = nil;
 }
 
 + (void)cancelOverlayImmediately {
-    if (realTimeGcdTimer) {
-        dispatch_source_cancel(realTimeGcdTimer);
-        realTimeGcdTimer = nil;
-    }
+    isThreadRunning = NO;
+    currentSessionID++; // Hủy mọi luồng cũ đang chạy
+
     if (currentOverlayView) {
         [currentOverlayView removeFromSuperview];
         currentOverlayView = nil;
+        currentCountdownLabel = nil;
     }
 }
 
-+ (void)showOverlayForTimeInterval:(NSInteger)seconds onViewController:(UIViewController *)vc {
++ (void)showOverlayOnViewController:(UIViewController *)vc {
     [self cancelOverlayImmediately];
 
+    // Delay 0.25s bằng luồng phần cứng
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if ([self isMainListScreen:vc.view]) {
             return;
         }
 
         UIView *rctButton = [self findRCTSwipeButtonView:vc.view];
-        
         UIView *parentView = nil;
         CGRect overlayFrame;
         CGFloat cornerRadius = 25.0f;
@@ -364,44 +427,20 @@ static UIView *currentOverlayView = nil;
         countdownLabel.font = [UIFont boldSystemFontOfSize:15.0f];
         countdownLabel.textAlignment = NSTextAlignmentCenter;
         countdownLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        countdownLabel.text = @"Đọc kỹ đơn: chờ 5s...";
         [overlay addSubview:countdownLabel];
 
         [parentView addSubview:overlay];
         [parentView bringSubviewToFront:overlay];
+
         currentOverlayView = overlay;
+        currentCountdownLabel = countdownLabel;
 
-        __block NSInteger remainingSeconds = seconds;
-        countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
-
-        // Dùng GCD Timer (DISPATCH_SOURCE_TYPE_TIMER) chạy chuẩn xác 1 giây thực tế (1,000,000,000 nanoseconds)
-        dispatch_queue_t mainQueue = dispatch_get_main_queue();
-        realTimeGcdTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, mainQueue);
-        
-        dispatch_source_set_timer(realTimeGcdTimer,
-                                  dispatch_time(DISPATCH_TIME_NOW, 1LL * NSEC_PER_SEC),
-                                  1LL * NSEC_PER_SEC,
-                                  0);
-
-        dispatch_source_set_event_handler(realTimeGcdTimer, ^{
-            remainingSeconds--;
-            if (remainingSeconds > 0) {
-                countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)remainingSeconds];
-            } else {
-                if (realTimeGcdTimer) {
-                    dispatch_source_cancel(realTimeGcdTimer);
-                    realTimeGcdTimer = nil;
-                }
-                [UIView animateWithDuration:0.25 animations:^{
-                    if (currentOverlayView) {
-                        currentOverlayView.alpha = 0.0f;
-                    }
-                } completion:^(BOOL finished) {
-                    [OrderOverlayManager cancelOverlayImmediately];
-                }];
-            }
-        });
-
-        dispatch_resume(realTimeGcdTimer);
+        // Khởi động Pthread đếm nhịp phần cứng độc lập
+        isThreadRunning = YES;
+        int thisSession = ++currentSessionID;
+        pthread_create(&countdownThread, NULL, countdown_worker_thread, (void *)(intptr_t)thisSession);
+        pthread_detach(countdownThread);
     });
 }
 
@@ -415,7 +454,7 @@ static void (*orig_viewWillDisappear)(id self, SEL _cmd, BOOL animated);
 
 static void my_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
     orig_viewDidAppear(self, _cmd, animated);
-    [OrderOverlayManager showOverlayForTimeInterval:5 onViewController:self];
+    [OrderOverlayManager showOverlayOnViewController:self];
 }
 
 static void my_viewWillDisappear(UIViewController *self, SEL _cmd, BOOL animated) {
