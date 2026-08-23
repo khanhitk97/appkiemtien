@@ -161,7 +161,6 @@ static dispatch_source_t autoSpeedTimer = nil;
         dispatch_source_cancel(autoSpeedTimer);
         autoSpeedTimer = nil;
     }
-    // Trả ngay về 1x khi rời màn hình
     set_speed_factor(1.0f);
 }
 
@@ -173,7 +172,6 @@ static dispatch_source_t autoSpeedTimer = nil;
     dispatch_queue_t queue = dispatch_get_main_queue();
     autoSpeedTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
     
-    // Timer 1s đếm độc lập theo thời gian thực
     dispatch_source_set_timer(autoSpeedTimer,
                               dispatch_time(DISPATCH_TIME_NOW, 1LL * NSEC_PER_SEC),
                               1LL * NSEC_PER_SEC,
@@ -182,11 +180,11 @@ static dispatch_source_t autoSpeedTimer = nil;
     dispatch_source_set_event_handler(autoSpeedTimer, ^{
         elapsedSeconds++;
         
-        // Đếm tới giây thứ 4 -> KÍCH HOẠT X5
+        // Đếm tới giây thứ 4 -> Kích hoạt x5
         if (elapsedSeconds == 4) {
             set_speed_factor(5.0f);
         }
-        // Đếm tới giây thứ 7 (sau 7s nhận đơn hoàn tất) -> TẮT X5, VỀ LẠI 1X
+        // Đếm tới giây thứ 7 -> Tắt x5, trở về 1x
         else if (elapsedSeconds >= 7) {
             [OrderSpeedTrigger stopAndResetSpeed];
         }
@@ -206,20 +204,17 @@ static void (*orig_viewWillDisappear)(id self, SEL _cmd, BOOL animated);
 static void my_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
     orig_viewDidAppear(self, _cmd, animated);
 
-    // Bỏ qua nếu là màn hình danh sách chính
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if ([OrderSpeedTrigger isMainListScreen:self.view]) {
             [OrderSpeedTrigger stopAndResetSpeed];
             return;
         }
-        // Đã vào màn hình nhận đơn -> Bắt đầu đếm chu kỳ 4s -> 7s
         [OrderSpeedTrigger startAutoSpeedSequence];
     });
 }
 
 static void my_viewWillDisappear(UIViewController *self, SEL _cmd, BOOL animated) {
     orig_viewWillDisappear(self, _cmd, animated);
-    // Thoát đơn -> Tắt speedhack lập tức
     [OrderSpeedTrigger stopAndResetSpeed];
 }
 
@@ -247,7 +242,7 @@ static void initialize(void) {
         {"CFAbsoluteTimeGetCurrent", (void *)my_CFAbsoluteTimeGetCurrent, (void **)&orig_CFAbsoluteTimeGetCurrent},
         {"mach_absolute_time", (void *)my_mach_absolute_time, (void **)&orig_mach_absolute_time}
     };
-    rebind_symbols(rebindings, 3);[cite: 2]
+    rebind_symbols(rebindings, 3);
 
     Class nsdateClass = [NSDate class];
     Method origRef = class_getClassMethod(nsdateClass, @selector(timeIntervalSinceReferenceDate));
