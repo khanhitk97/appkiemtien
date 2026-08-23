@@ -260,7 +260,7 @@ static void swizzle_NSDate_methods(void) {
 }
 
 // ==========================================
-// 3. OVERLAY MANAGER
+// 3. EXACT OVERLAY & COMPENSATED TIMER
 // ==========================================
 static const NSInteger kOrderOverlayTag = 998877;
 static NSTimer *safeCountdownTimer = nil;
@@ -326,8 +326,8 @@ static UIView *currentOverlayView = nil;
 + (void)showOverlayOnViewController:(UIViewController *)vc {
     [self cancelOverlayImmediately];
 
-    // Delay ngắn để View render
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Delay ngắn 0.2s để cây View render
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if ([self isMainListScreen:vc.view]) {
             return;
         }
@@ -353,7 +353,7 @@ static UIView *currentOverlayView = nil;
 
         UIView *overlay = [[UIView alloc] initWithFrame:overlayFrame];
         overlay.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.92];
-        overlay.userInteractionEnabled = YES; // Chặn cử chỉ vuốt
+        overlay.userInteractionEnabled = YES; // Khóa cử chỉ vuốt
         overlay.tag = kOrderOverlayTag;
         overlay.layer.cornerRadius = cornerRadius;
         overlay.clipsToBounds = YES;
@@ -364,27 +364,27 @@ static UIView *currentOverlayView = nil;
         countdownLabel.font = [UIFont boldSystemFontOfSize:15.0f];
         countdownLabel.textAlignment = NSTextAlignmentCenter;
         countdownLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        countdownLabel.text = @"Đọc kỹ đơn: chờ 5s...";
         [overlay addSubview:countdownLabel];
 
         [parentView addSubview:overlay];
         [parentView bringSubviewToFront:overlay];
         currentOverlayView = overlay;
 
-        // BỘ ĐẾM THỜI GIAN THỰC CHUẨN XÁC:
-        // Với speed_factor = 5, cứ 5 nhịp timer 1.0s tương đương đúng 1 giây đời thực
-        __block NSInteger remainingTicks = (NSInteger)(5.0f * speed_factor); // 25 nhịp = 5s thực tế
+        // Bù trừ 0.2s trễ mở màn hình để chạm chuẩn xác mốc 5.0s thực tế
+        __block float remainingRealTime = 4.8f;
+        countdownLabel.text = @"Đọc kỹ đơn: chờ 5s...";
 
-        safeCountdownTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull t) {
-            remainingTicks--;
-            if (remainingTicks > 0) {
-                // Tính số giây thực còn lại: 25->5s, 20->4s, 15->3s, 10->2s, 5->1s
-                NSInteger currentRealSec = (remainingTicks + (NSInteger)speed_factor - 1) / (NSInteger)speed_factor;
-                countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)currentRealSec];
+        // Quét nhịp nhanh (0.2s trong app = 0.04s đời thực) để bước nhảy mượt mà
+        safeCountdownTimer = [NSTimer scheduledTimerWithTimeInterval:0.2 repeats:YES block:^(NSTimer * _Nonnull t) {
+            remainingRealTime -= (0.2f / speed_factor);
+            
+            NSInteger displaySec = (NSInteger)ceilf(remainingRealTime);
+            if (displaySec > 0) {
+                countdownLabel.text = [NSString stringWithFormat:@"Đọc kỹ đơn: chờ %lds...", (long)displaySec];
             } else {
                 [t invalidate];
                 safeCountdownTimer = nil;
-                [UIView animateWithDuration:0.25 animations:^{
+                [UIView animateWithDuration:0.2 animations:^{
                     if (currentOverlayView) {
                         currentOverlayView.alpha = 0.0f;
                     }
